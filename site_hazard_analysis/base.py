@@ -8,10 +8,18 @@ import json
 import matplotlib as mpl
 import os
 import subprocess
+import h5py
 
 from scipy import stats
+from scipy.optimize import minimize
 from functools import partial
 from shapely.geometry import Point, LineString, shape
+from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits.mplot3d import proj3d
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from matplotlib.colors import to_rgba
+from matplotlib.colors import to_hex
 
 
 # set all single line variables to be displayed, not just the last line
@@ -34,6 +42,31 @@ def set_plot_formatting():
     plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
     plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
     plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
+
+
+def grayscale_version(color):
+    conversion = np.array([0.299, 0.587, 0.114])
+
+    grayscale = np.repeat(np.matmul(conversion, color), 3)
+
+    return grayscale
+
+
+def check_colors(colors, linewidth):
+    fig, ax = plt.subplots(1, 1, figsize=(3, 2))
+    for i in range(len(colors)):
+        _ = ax.plot([0, .5], [i, i], color=colors[i], linewidth=linewidth)
+        _ = ax.plot([.5, 1], [i, i], color=grayscale_version(colors[i][:-1]), linewidth=linewidth)
+        _ = ax.axis('off')
+
+
+def orthogonal_proj(zfront, zback):
+    a = (zfront+zback)/(zfront-zback)
+    b = -2*(zfront*zback)/(zfront-zback)
+    return np.array([[1,0,0,0],
+                        [0,1,0,0],
+                        [0,0,a,b],
+                        [0,0,0,zback]])
 
 
 def utm_conversion(lat, long):

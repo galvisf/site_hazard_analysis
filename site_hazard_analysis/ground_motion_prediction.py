@@ -1,18 +1,28 @@
 from .base import *
+from .eq_rates import *
 
 
 def cy_2008_nga(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10):
     periods = ['pga', 'pgv', 0.01, 0.02, 0.03, 0.04, 0.05, 0.075, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5,
                2.0, 3.0, 4.0, 5.0, 7.5, 10.0]
 
+    cy2008_parameters = load_CY2008_parameters(display_tables=False)
+
     # set up a new function sets all parameters other than t
     cy_2008_nga_partial = partial(cy_2008_nga_sub, m, r_rup, r_jb, r_x,
                                   delta, rake_angle, z_tor,
-                                  f_as, vs30, f_vs30, z_10)
+                                  f_as, vs30, f_vs30, z_10,
+                                  cy2008_parameters)
 
-    # t == 'all' uses all the T values from the model
+    # check the t input
     if type(t) == str:
-        t = periods[2:]  # remove pga and pgv
+        # 'pga' or 'pgv' is a viable string
+        if t in ['pga', 'pgv']:
+            t = [t]
+        # any other string will return all the T values from the model
+        else:
+            t = periods[2:]  # remove pga and pgv
+    # if t is a scalar value, put it in list form
     if (type(t) == float) | (type(t) == int):
         t = [t]
 
@@ -22,58 +32,67 @@ def cy_2008_nga(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_
         median = [x[0] for x in gmpe_results]
         sigma = [x[1] for x in gmpe_results]
 
-    # if one or more periods need to be interplolated
     else:
-        median = np.zeros(len(t))
-        sigma = np.zeros_like(median)
+        # check that all the periods are within the period range
+        periods = np.array(periods[2:])
+        if all((t >= min(periods)) & (t <= max(periods))):
 
-        # remove the pga and pgv options
-        periods = periods[2:]
-        for i in range(len(t)):
-            t_i = t[i]
+            # if less than n periods need to be interplolated
+            n_periods = 5
+            if n_periods >= np.sum([t_i not in periods for t_i in t]):
 
-            # if period does not need to be interpolated
-            if t_i in periods:
-                median[i], sigma[i] = cy_2008_nga_partial(t_i)
+                median = np.zeros(len(t))
+                sigma = np.zeros_like(median)
+                # loop over periods
+                for i in range(len(t)):
+                    t_i = t[i]
 
-            # if period does need to be interpolated
+                    # if period does not need to be interpolated
+                    if t_i in periods:
+                        median[i], sigma[i] = cy_2008_nga_partial(t_i)
+
+                    # if period does to be interpolated
+                    else:
+                        idx = np.searchsorted(periods, t_i)
+
+                        t_low = periods[idx - 1]
+                        median_low, sigma_low = cy_2008_nga_partial(t_low)
+
+                        t_hi = periods[idx]
+                        median_hi, sigma_hi = cy_2008_nga_partial(t_hi)
+
+                        # interpolate in log space
+                        log_ti = np.log(t_i)
+                        x = np.log([t_low, t_hi])
+                        medians = np.log([median_low, median_hi])
+                        sigmas = [sigma_low, sigma_hi]
+
+                        median[i] = np.exp(np.interp(log_ti, x, medians))
+                        sigma[i] = np.interp(log_ti, x, sigmas)
+
+            # if more than n periods needs to be interpolated
             else:
-                idx = np.searchsorted(periods, t_i)
+                # retrieve only the periods that are necessary for interpolation
+                idx_min = max(np.searchsorted(periods, min(t)) - 1, 0)
+                idx_max = np.searchsorted(periods, max(t)) + 1
+                periods = periods[idx_min:idx_max]
 
-                if idx == len(periods):
-                    print(periods)
-                    print(t_i)
-                    print(idx)
-
-                t_low = periods[idx - 1]
-                median_low, sigma_low = cy_2008_nga_partial(t_low)
-
-                t_hi = periods[idx]
-                median_hi, sigma_hi = cy_2008_nga_partial(t_hi)
+                # retrieve all the available T values
+                gmpe_results = [cy_2008_nga_partial(t_i) for t_i in periods]
+                median = [x[0] for x in gmpe_results]
+                sigma = [x[1] for x in gmpe_results]
 
                 # interpolate in log space
-                log_ti = np.log(t_i)
-                x = np.log([t_low, t_hi])
-                medians = np.log([median_low, median_hi])
-                sigmas = [sigma_low, sigma_hi]
+                median = np.exp(np.interp(np.log(t), np.log(periods), np.log(median)))
+                sigma = np.interp(np.log(t), np.log(periods), sigma)
 
-                median[i] = np.exp(np.interp(log_ti, x, medians))
-                sigma[i] = np.interp(log_ti, x, sigmas)
+        else:
+            raise ValueError('Periods do not fall within the GMPE range')
 
     return median, sigma, t
 
 
-
-def cy_2008_nga_sub(m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10, i_period):
-    delta = delta * np.pi / 180  # convert to radians
-    f_rv = (rake_angle >= 30) & (rake_angle <= 150)  # reverse fault flag, 1 for lambda between 30 and 150, 0 otherwise
-    f_nm = (rake_angle >= -120) & (
-    rake_angle <= -60)  # normal fault flag,  1 for lambda between -120 and -60, 0 otherwise
-    f_hw = r_x >= 0  # hanging wall flag
-
-    f_inferred = (f_vs30 == 1)  # 1 if inferred
-    f_measured = (f_vs30 == 0)  # 1 if measured
-
+def load_CY2008_parameters(display_tables):
     periods = ['pga', 'pgv', 0.01, 0.02, 0.03, 0.04, 0.05, 0.075, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5,
                2.0, 3.0, 4.0, 5.0, 7.5, 10.0]
 
@@ -146,6 +165,16 @@ def cy_2008_nga_sub(m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f
     sigma4 = [0.0663, 0.0133, 0.0663, 0.0663, 0.0663, 0.0663, 0.0663, 0.0663, 0.0663, 0.0612, 0.0530, 0.0457, 0.0398,
               0.0312, 0.0255, 0.0175, 0.0133, 0.0090, 0.0068, 0.0045, 0.0034, 0.0027, 0.0018, 0.0014]
 
+    # table 1
+    c_constants = dict()
+    c_constants['c2'] = c2
+    c_constants['c3'] = c3
+    c_constants['c4'] = c4
+    c_constants['c4a'] = c4a
+    c_constants['crb'] = crb
+    c_constants['chm'] = chm
+    c_constants['cy3'] = cy3
+
     # table 2
     df = pd.DataFrame(index=periods)
     df.index.name = 'Spectra Period (sec)'
@@ -189,25 +218,40 @@ def cy_2008_nga_sub(m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f
     df['sigma4'] = sigma4
     variance_dict = df.to_dict()
 
-    if False:
-        # table 1
-        df = pd.DataFrame()
-        df['c2'] = [c2]
-        df['c3'] = [c3]
-        df['c4'] = [c4]
-        df['c4a'] = [c4a]
-        df['crb'] = [crb]
-        df['chm'] = [chm]
-        df['cy3'] = [cy3]
-        display(df)
-
+    if display_tables:
+        display(pd.DataFrame(c_constants, index=[0]))
         display(pd.DataFrame(c_dict))
         display(pd.DataFrame(phi_dict))
         display(pd.DataFrame(variance_dict))
 
+    return [c_constants, c_dict, phi_dict, variance_dict]
+
+
+
+def cy_2008_nga_sub(m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10, cy2008_parameters, i_period):
+    delta = delta * np.pi / 180  # convert to radians
+    f_rv = (rake_angle >= 30) & (rake_angle <= 150)  # reverse fault flag, 1 for lambda between 30 and 150, 0 otherwise
+    f_nm = (rake_angle >= -120) & (
+    rake_angle <= -60)  # normal fault flag,  1 for lambda between -120 and -60, 0 otherwise
+    f_hw = r_x >= 0  # hanging wall flag
+
+    f_inferred = (f_vs30 == 1)  # 1 if inferred
+    f_measured = (f_vs30 == 0)  # 1 if measured
+
     ## Evaluate Equation 13a for the reference intensity at Vs30=1130
 
+    # Retrieve the coefficient that do not depend on the period of interest
+    c_constants = cy2008_parameters[0]
+    c2  = c_constants['c2']
+    c3  = c_constants['c3']
+    c4  = c_constants['c4']
+    c4a = c_constants['c4a']
+    crb = c_constants['crb']
+    chm = c_constants['chm']
+    cy3 = c_constants['cy3']
+
     # Retrieve the coefficients that depend on the period of interest
+    c_dict = cy2008_parameters[1]
     c1 = c_dict['c1'][i_period]
     c1a = c_dict['c1a'][i_period]
     c1b = c_dict['c1b'][i_period]
@@ -244,6 +288,7 @@ def cy_2008_nga_sub(m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f
     ## Apply soil effects via Equation 13b
 
     # Retrieve the coefficients that depend on the period of interest
+    phi_dict = cy2008_parameters[2]
     phi1 = phi_dict['phi1'][i_period]
     phi2 = phi_dict['phi2'][i_period]
     phi3 = phi_dict['phi3'][i_period]
@@ -264,6 +309,7 @@ def cy_2008_nga_sub(m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f
     ## Evaluate the variability
 
     # Retrieve the coefficients that depend on the period of interest
+    variance_dict = cy2008_parameters[3]
     tau1 = variance_dict['tau1'][i_period]
     tau2 = variance_dict['tau2'][i_period]
     sigma1 = variance_dict['sigma1'][i_period]
@@ -349,151 +395,134 @@ def baker_jayaram_correlation(t1, t2):
     return rho
 
 
-def prob_im_sa_t(t, m, r, vs30, f_as, im):
-    r_rup = r  # closest distance to rupture plane (km)
-    r_jb = r  # Joyner-Boore distance to rupture plane (km)
-    r_x = r  # Site coordinate (km) perpendicular to fault strike
+def set_sa_avg_parameters(t, t_min_factor, t_max_factor, dt):
+    sa_avg_parameters = dict()
 
-    delta = 0  # fault dip angle
-    rake_angle = 0  # fault rake angle ('lambda' has a unique meaning in python)
-    z_tor = 0  # depth to top of rupture (km)
+    # create a vector of period values
+    t_min = t_min_factor * t
+    t_max = t_max_factor * t
+    t = np.arange(t_min, t_max, dt)
+    if t[-1] != t_max:
+        t = np.append(t, t_max)
+    sa_avg_parameters['t_range'] = t
 
-    f_vs30 = 1  # vs30 source [1:inferred, 0:measured]
-    z_10 = 1  # depth to shear wave velocity of 1 km/s (m)
+    # calculate the empirical correlation between each period pair
+    n_t = len(t)
+    rho = np.zeros((n_t, n_t))
+    for i_t1, t1 in enumerate(t):
+        for i_t2, t2 in enumerate(t[t >= t1]):
+            rho[i_t1, i_t2 + i_t1] = baker_jayaram_correlation(t1, t2)
 
-    y, sigma, t = cy_2008_nga(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10)
-    y = y[0]
-    sigma = sigma[0]
+    # mirror the upper triangle to make a symmetric correlation matrix
+    i_lower = np.tril_indices(n_t, -1)
+    rho[i_lower] = rho.T[i_lower]
+    sa_avg_parameters['rho'] = rho
 
-    p = 1 - stats.lognorm.cdf(im, s=sigma, scale=y)
-    epsilon = (np.log(im) - np.log(y)) / sigma
-
-    return p, epsilon
-
-
-def sa_t_hazard_curve_integration(t, rate_r_m, im_list, vs30, f_as, im_plot):
-    m_list = rate_r_m.index
-    r_list = rate_r_m.columns
-    rate_r_m = rate_r_m.to_numpy()
-
-    prob_im_given_r_m = np.zeros([len(m_list), len(r_list), len(im_list)])
-
-    for m, i_m in zip(m_list, range(len(m_list))):
-        for r, i_r in zip(r_list, range(len(r_list))):
-            prob_im_partial = partial(prob_im_sa_t, t, m, r, vs30, f_as)
-            p_im, epsilon_im = prob_im_partial(im_list)
-
-            prob_im_given_r_m[i_m, i_r, :] = p_im
-
-    rate_im_given_r_m = np.repeat(np.expand_dims(rate_r_m, 2), len(im_list), 2) * prob_im_given_r_m
-    rate_im = np.sum(np.sum(rate_im_given_r_m, axis=0), axis=0)
-
-    prob_m_r_given_im = np.zeros_like(rate_im_given_r_m)
-    for i_im in range(len(im_list)):
-        prob_m_r_given_im[:, :, i_im] = rate_im_given_r_m[:, :, i_im] / rate_im[i_im]
-
-    if im_plot is not None:
-        i_im = np.where(im_list == im_plot)[0][0]
-
-        fig, ax = plt.subplots(1, 1, figsize=(15, 5))
-        _ = sns.heatmap(prob_im_given_r_m[:, :, i_im], linewidth=0.5)
-        _ = ax.set_xlabel('Site to Source Distance, R')
-        _ = ax.set_xticks(np.arange(len(r_list)))
-        _ = ax.set_xticklabels(r_list, rotation=90)
-        _ = ax.set_ylabel('Magnitude, M')
-        _ = ax.set_yticklabels(m_list, rotation=0)
-        _ = ax.set_title('P(Sa(T={0:.1f}'.format(t) + ') >= {0:.2g}g'.format(im_list[i_im]) + ') | M,R')
-        _ = plt.show()
-
-        fig, ax = plt.subplots(1, 1, figsize=(15, 5))
-        _ = sns.heatmap(prob_m_r_given_im[:, :, i_im], linewidth=0.5)
-        _ = ax.set_xlabel('Site to Source Distance, R')
-        _ = ax.set_xticks(np.arange(len(r_list)))
-        _ = ax.set_xticklabels(r_list, rotation=90)
-        _ = ax.set_ylabel('Magnitude, M')
-        _ = ax.set_yticklabels(m_list, rotation=0)
-        _ = ax.set_title('Contribution to Sa(T={0:.1f}'.format(t) + ') >= {0:.2g}g'.format(im_list[i_im]))
-        _ = plt.show()
-
-        fig, ax = plt.subplots(1, 1, figsize=(15, 5))
-        _ = sns.heatmap(rate_im_given_r_m[:, :, i_im], linewidth=0.5)
-        _ = ax.set_xlabel('Site to Source Distance, R')
-        _ = ax.set_xticks(np.arange(len(r_list)))
-        _ = ax.set_xticklabels(r_list, rotation=90)
-        _ = ax.set_ylabel('Magnitude, M')
-        _ = ax.set_yticklabels(m_list, rotation=0)
-        _ = ax.set_title('MAF of Sa(T={0:.1f}'.format(t) + ') >= {0:.2g}g'.format(im_list[i_im]) + ' | M,R')
-        _ = plt.show()
-
-    return rate_im, rate_im_given_r_m
+    return sa_avg_parameters
 
 
+def sa_avg_gmpe(t, sa_avg_parameters, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10):
 
-def sa_avg_gmpe(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10):
+    # if the sa_avg_parameters were not passed, set them based on Eads 2015
+    if sa_avg_parameters is None:
+        t_min_factor = 0.2
+        t_max_factor = 3
+        dt = 0.01
+        sa_avg_parameters = set_sa_avg_parameters(t, t_min_factor, t_max_factor, dt)
+
+    t = sa_avg_parameters['t_range']
+    rho = sa_avg_parameters['rho']
+
     # retrieve median and standard deviations for each period
     y, sigma, t = cy_2008_nga(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10)
 
-    # calculate the empirical correlation between each period
-    n_t = len(t)
-    rho = np.array([baker_jayaram_correlation(t1, t2) for t1 in t for t2 in t]).reshape([n_t, n_t])
-
-    # check that the correlation matrix is symmetric
-    if not np.allclose(rho, rho.T, atol=1e-8):
-        raise ValueError('Correlation matrix for etas is not symmetric.')
-
     # calculate the median for sa_avg
+    n_t = len(t)
     y_sa_avg = np.exp((1 / n_t) * np.sum(np.log(y)))
 
     # calculate the sigma for sa_avg
-    sigma_sa_avg = np.matmul(np.matmul(sigma, rho), sigma)
+    sigma_sa_avg = np.sqrt((1/n_t**2) * np.matmul(np.matmul(sigma, rho), sigma))
 
-    return y_sa_avg, sigma_sa_avg, t
+    return y_sa_avg, sigma_sa_avg
 
 
-def prob_im_sa_avg(t, t_min_factor, t_max_factor, dt, m, r, vs30, f_as, im):
+def prob_exceeding_im(t, m, r, f_as, vs30, f_vs30, z_10, im_type, sa_avg_parameters, im_list):
+
+    # set all distances equal to r
     r_rup = r  # closest distance to rupture plane (km)
     r_jb = r  # Joyner-Boore distance to rupture plane (km)
-    r_x = r  # Site coordinate (km) perpendicular to fault strike
+    r_x = r  # Site coordinate perpendicular to fault strike (km)
 
-    delta = 0  # fault dip angle
-    rake_angle = 0  # fault rake angle ('lambda' has a unique meaning in python)
+    # assume a vertical fault
+    delta = 90  # fault dip angle
+
+    # assume rupture reaches the surface
     z_tor = 0  # depth to top of rupture (km)
 
-    f_vs30 = 1  # vs30 source [1:inferred, 0:measured]
-    z_10 = 1  # depth to shear wave velocity of 1 km/s (m)
+    # assume strike-slip (see Chiou and Youngs 2008 for classification of normal and reverse)
+    rake_angle = 0  # fault rake angle ('lambda' in Chiou and Youngs 2008)
 
-    y, sigma, t = sa_avg_gmpe(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10)
+    # if z_10 is not specified, use Eqn 1 from Chiou and Youngs 2008
+    # depth to shear wave velocity of 1 km/s (m)
+    if z_10 is None:
+        z_10 = np.exp(28.5 - (3.82 / 8) * np.log(vs30 ** 8 + 378.7 ** 8))
 
-    p = 1 - stats.lognorm.cdf(im, s=sigma, scale=y)
-    epsilon = (np.log(im) - np.log(y)) / sigma
+    # call the gmpe based on the intensity measure
+    if im_type == 'sa_t':
+        y, sigma, t = cy_2008_nga(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10)
+        y = y[0]
+        sigma = sigma[0]
+    elif im_type == 'sa_avg':
+        y, sigma = sa_avg_gmpe(t, sa_avg_parameters, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10)
+
+    # calculate the probability of exceeding each im value
+    p = 1 - stats.lognorm.cdf(im_list, s=sigma, scale=y)
+    epsilon = (np.log(im_list) - np.log(y)) / sigma
 
     return p, epsilon
 
 
-def sa_avg_hazard_curve_integration(t, t_min_factor, t_max_factor, dt, rate_r_m, im_list, vs30, f_as, im_plot):
+def hazard_curve_integration(t, rate_r_m, im_type, sa_avg_parameters, im_list, site_parameters, f_as, im_plot):
+    # retrieve the list of m and r values in the rate matrix
     m_list = rate_r_m.index
     r_list = rate_r_m.columns
     rate_r_m = rate_r_m.to_numpy()
 
+    # retrieve relevant site parameters
+    vs30 = site_parameters['vs30']
+    f_vs30 = site_parameters['f_vs30']
+    z_10 = site_parameters['z_10']
+
+    # initialize an array for storing the probabilities of exceedance
     prob_im_given_r_m = np.zeros([len(m_list), len(r_list), len(im_list)])
 
+    # loop over all m and r values for the p(exceedance) of each im level
     for m, i_m in zip(m_list, range(len(m_list))):
         for r, i_r in zip(r_list, range(len(r_list))):
-            prob_im_partial = partial(prob_im_sa_avg, t, t_min_factor, t_max_factor, dt, m, r, vs30, f_as)
-            p_im, epsilon_im = prob_im_partial(im_list)
-
+            p_im, epsilon_im = prob_exceeding_im(t, m, r, f_as, vs30, f_vs30, z_10, im_type, sa_avg_parameters, im_list)
             prob_im_given_r_m[i_m, i_r, :] = p_im
 
+    # combine the rate of each m and r pair with the p(exceedance)
     rate_im_given_r_m = np.repeat(np.expand_dims(rate_r_m, 2), len(im_list), 2) * prob_im_given_r_m
     rate_im = np.sum(np.sum(rate_im_given_r_m, axis=0), axis=0)
 
+    # find the probability of each m and r pair, given the im was exceeded
     prob_m_r_given_im = np.zeros_like(rate_im_given_r_m)
     for i_im in range(len(im_list)):
         prob_m_r_given_im[:, :, i_im] = rate_im_given_r_m[:, :, i_im] / rate_im[i_im]
 
+    # plot figures for an im level, if desired
     if im_plot is not None:
         i_im = np.where(im_list == im_plot)[0][0]
 
+        # set the intensity measure label
+        if im_type == 'sa_t':
+            label_tag = ')'
+        elif im_type == 'sa_avg':
+            label_tag = ')$_{avg}$'
+        label_tag = 'Sa(T=' + '{0:.1f}'.format(t) + label_tag + ' >= ' + '{0:.2g}g'.format(im_list[i_im])
+
+        # probability of exceedance, given m and r pairs
         fig, ax = plt.subplots(1, 1, figsize=(15, 5))
         _ = sns.heatmap(prob_im_given_r_m[:, :, i_im], linewidth=0.5)
         _ = ax.set_xlabel('Site to Source Distance, R')
@@ -501,9 +530,10 @@ def sa_avg_hazard_curve_integration(t, t_min_factor, t_max_factor, dt, rate_r_m,
         _ = ax.set_xticklabels(r_list, rotation=90)
         _ = ax.set_ylabel('Magnitude, M')
         _ = ax.set_yticklabels(m_list, rotation=0)
-        _ = ax.set_title('P(Sa(T={0:.1f}'.format(t) + ')$_{avg}$ >= ' + '{0:.2g}g'.format(im_list[i_im]) + ') | M,R')
+        _ = ax.set_title('P(' + label_tag + ') | M,R')
         _ = plt.show()
 
+        # contribution of each m and r pair to the current exceedance level
         fig, ax = plt.subplots(1, 1, figsize=(15, 5))
         _ = sns.heatmap(prob_m_r_given_im[:, :, i_im], linewidth=0.5)
         _ = ax.set_xlabel('Site to Source Distance, R')
@@ -511,9 +541,10 @@ def sa_avg_hazard_curve_integration(t, t_min_factor, t_max_factor, dt, rate_r_m,
         _ = ax.set_xticklabels(r_list, rotation=90)
         _ = ax.set_ylabel('Magnitude, M')
         _ = ax.set_yticklabels(m_list, rotation=0)
-        _ = ax.set_title('Contribution to Sa(T={0:.1f}'.format(t) + ')$_{avg}$ >= ' + '{0:.2g}g'.format(im_list[i_im]))
+        _ = ax.set_title('Contribution to ' + label_tag)
         _ = plt.show()
 
+        # mean annual frequency of exceeding the current im level from each m and r pair
         fig, ax = plt.subplots(1, 1, figsize=(15, 5))
         _ = sns.heatmap(rate_im_given_r_m[:, :, i_im], linewidth=0.5)
         _ = ax.set_xlabel('Site to Source Distance, R')
@@ -522,7 +553,50 @@ def sa_avg_hazard_curve_integration(t, t_min_factor, t_max_factor, dt, rate_r_m,
         _ = ax.set_ylabel('Magnitude, M')
         _ = ax.set_yticklabels(m_list, rotation=0)
         _ = ax.set_title(
-            'MAF of Sa(T={0:.1f}'.format(t) + ')$_{avg}$ >= ' + '{0:.2g}g'.format(im_list[i_im]) + ' | M,R')
+            'MAF of ' + label_tag + ' | M,R')
         _ = plt.show()
 
     return rate_im, rate_im_given_r_m
+
+
+def aftershock_im_exceedance_probability(m_mainshock, aftershock_parameters, site_fault_geometry, site_parameters,
+                                         bldg_t, im_type, sa_avg_parameters, im_list, plot_flag):
+    f_as = 1
+
+    m_max = m_mainshock
+    m_min = aftershock_parameters['m_min']
+    b = aftershock_parameters['b']
+    dm = 0.25
+    dr = 5
+
+    r_m_distribution = aftershock_r_and_m_distribution(site_fault_geometry, m_min, m_max, b, dm, dr, plot_flag=False)
+
+    im_plot = None
+    as_im_probability, prob_im_given_r_m = hazard_curve_integration(bldg_t, r_m_distribution, im_type,
+                                                                    sa_avg_parameters, im_list, site_parameters, f_as,
+                                                                    im_plot)
+
+    if plot_flag:
+        if im_type == 'sa_t':
+            label_tag = ')'
+        elif im_type == 'sa_avg':
+            label_tag = ')$_{avg}$'
+
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+        _ = ax.loglog(im_list, as_im_probability)
+
+        _ = ax.set_xlabel('Sa(T=' + '{0:.1f}'.format(bldg_t) + label_tag + ' [g]')
+        _ = ax.set_ylabel('Probability of Exceedance,\nGiven the Occurance\nof an Aftershock')
+        _ = ax.xaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda y, _: '{:.2g}'.format(y)))
+        _ = ax.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda y, _: '{:.2g}'.format(y)))
+
+        dim = min(im_list)
+        _ = ax.set_ylim([0.00001, 1])
+        _ = ax.set_xlim([dim, 1])
+        _ = ax.set_xticks([dim * 5, 0.005, 0.05, 0.5], minor=True)
+        _ = ax.grid(axis='y', which='major')
+        _ = ax.grid(axis='x', which='both')
+
+        _ = ax.set_title('Mainshock Magnitude: ' + str(m_max) + 'Mw')
+
+    return as_im_probability

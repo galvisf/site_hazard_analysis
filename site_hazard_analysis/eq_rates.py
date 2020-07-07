@@ -155,22 +155,63 @@ def perpendicular_distance(a, b, c):
 
     return d, p, l1, l2
 
+def cut_line(line, distance):
+    # Cuts a line in two at a distance from its starting point
+    if distance <= 0.0 or distance >= line.length:
+        return [LineString(line)]
+    coords = list(line.coords)
+    for i, p in enumerate(coords):
+        pd = line.project(Point(p))
+        if pd == distance:
+            return [
+                LineString(coords[:i+1]),
+                LineString(coords[i:])]
+        if pd > distance:
+            cp = line.interpolate(distance)
+            return [
+                LineString(coords[:i] + [(cp.x, cp.y)]),
+                LineString([(cp.x, cp.y)] + coords[i:])]
 
-def prob_distance(m, fault_segment, fault_type, dr, plot_flag):
 
+def m_to_length(m, fault_type):
     # calculate rupture length based on Kramar 1999 empirical relationships
     # current implementation assumes a deterministic value for rup_length
     if fault_type == 'strike-slip':
         rup_length = 10 ** (0.74 * m - 3.55)
         sigma = 0.23
-    elif fault_type == 'strike-slip':
+    elif fault_type == 'reverse':
         rup_length = 10 ** (0.63 * m - 2.86)
         sigma = 0.20
-    elif fault_type == 'strike-slip':
+    elif fault_type == 'normal':
         rup_length = 10 ** (0.50 * m - 2.01)
         sigma = 0.21
     else:
         'unknown fault type'
+
+    return rup_length
+
+
+def m_to_area(m, fault_type):
+    # calculate rupture area based on Kramar 1999 empirical relationships
+    # current implementation assumes a deterministic value for rup_area
+    if fault_type == 'strike-slip':
+        rup_area = 10 ** (0.90 * m - 3.42)
+        sigma = 0.22
+    elif fault_type == 'reverse':
+        rup_area = 10 ** (0.98 * m - 3.99)
+        sigma = 0.26
+    elif fault_type == 'normal':
+        rup_area = 10 ** (0.82 * m - 2.87)
+        sigma = 0.22
+    else:
+        'unknown fault type'
+
+    return rup_area
+
+
+def prob_distance(m, fault_segment, fault_type, dr, plot_flag):
+
+    rup_length = m_to_length(m, fault_type)
 
     # calculate the range of relevant distances
     d, l1, l2 = fault_segment[['d', 'l1', 'l2']].values[0]
@@ -266,14 +307,14 @@ def prob_distance(m, fault_segment, fault_type, dr, plot_flag):
     return r_list, p_dist
 
 
-def prob_magnitude(m_max, m_min, b, dm):
+def prob_magnitude(m_max, m_min, b, dm, plot_flag):
     m_list = np.arange(m_min, m_max + 0.1, dm)
 
     cdf_mag = np.array([(1 - 10 ** (-b * (m - m_min))) / (1 - 10 ** (-b * (m_max - m_min))) for m in m_list])
     p_mag = cdf_mag[1:] - cdf_mag[:-1]
     p_mag = np.append(p_mag, 0)
 
-    if True:
+    if plot_flag:
         fig, ax = plt.subplots(1, 1)
         _ = plt.bar(m_list, p_mag, width=dm, edgecolor='k')
         _ = plt.xlabel('Magnitude')
@@ -281,3 +322,166 @@ def prob_magnitude(m_max, m_min, b, dm):
         _ = plt.show()
 
     return m_list, p_mag
+
+
+def select_mainshock_rupture(site, ruptures, m_mainshock, dm, fault):
+    m_min = m_mainshock - dm / 2
+    m_max = m_mainshock + dm / 2
+
+    magnitude_idx = (ruptures['Magnitude'] > m_min) & (ruptures['Magnitude'] <= m_max)
+    fault_idx = ruptures['Name'].str.contains(fault)
+    idx = magnitude_idx & fault_idx
+    r_min = ruptures[idx]['DistanceRup'].min()
+    distance_idx = (ruptures['DistanceRup'] >= r_min) & (ruptures['DistanceRup'] < r_min + 0.1)
+    idx = idx & distance_idx
+    idx = np.around(np.median(np.where(idx)[0])).astype('int')
+
+    return idx
+
+
+def rupture_segment_to_line(ruptures, idx):
+    crs = ruptures.crs['init']
+    if crs != 'epsg:4326':  # wgs84
+        raise Warning('ruptures must be in WGS84 coordinates')
+
+    points = list(ruptures['geometry'].iloc[idx].coords)
+    points = [points[0], points[-1]]
+    df_points = gpd.GeoDataFrame(geometry=[Point(xy) for xy in points])
+    df_points['Label'] = 'Mainshock'
+    df_points.set_index('Label', inplace=True)
+
+    longitude = np.array([x for x, y in points])
+    latitude = np.array([y for x, y in points])
+    df_points['Latitude'] = latitude
+    df_points['Longitude'] = longitude
+
+    [x, y] = utm_conversion(latitude, longitude)
+    x = x / 1000
+    y = y / 1000
+    df_points['x'] = x
+    df_points['y'] = y
+    df_points['x,y'] = [np.array([i, j]) for i, j in zip(x, y)]
+    df_points = df_points[['Latitude', 'Longitude', 'x', 'y', 'x,y', 'geometry']]
+
+    df_line = df_points.copy()
+    df_line = df_line.groupby(['Label'])['geometry'].apply(lambda x: LineString(x.tolist()))
+    df_line = gpd.GeoDataFrame(df_line, geometry='geometry')
+    df_line['Name'] = ruptures['Name'][idx]
+    df_line['Magnitude'] = ruptures['Magnitude'][idx]
+    df_line['Distance'] = ruptures['DistanceRup'][idx]
+    df_line['Mean Annual Frequency'] = ruptures['MeanAnnualRate'][idx]
+    df_line = df_line[['Name', 'Magnitude', 'Distance', 'Mean Annual Frequency', 'geometry']]
+
+    df_points.crs = crs
+    df_line.crs = crs
+
+    return df_points, df_line
+
+
+def instantaneous_rate_of_aftershocks(t, m_max, aftershock_parameters):
+    a = aftershock_parameters['a']
+    b = aftershock_parameters['b']
+    p = aftershock_parameters['p']
+    c = aftershock_parameters['c']
+
+    m_min = aftershock_parameters['m_min']
+
+    mu = (10 ** (a + b * (m_max - m_min)) - 10 ** a) / ((t + c) ** p)
+
+    return mu
+
+
+def mean_number_of_aftershocks(t, T, m_max, aftershock_parameters):
+    a = aftershock_parameters['a']
+    b = aftershock_parameters['b']
+    p = aftershock_parameters['p']
+    c = aftershock_parameters['c']
+
+    m_min = aftershock_parameters['m_min']
+
+    mu = ((10 ** (a + b * (m_max - m_min)) - 10 ** a) / (p - 1)) * ((t + c) ** (1 - p) - (t + T + c) ** (1 - p))
+
+    return mu
+
+
+def mean_occurance_surface(m_max, aftershock_parameters, t_values, T_values, plot_flag):
+
+    mean_occurance = np.zeros([len(T_values), len(t_values)])
+    for i_T, T in enumerate(T_values):
+        mean_occurance[i_T,:] = [mean_number_of_aftershocks(t=t, T=T, m_max=m_max, aftershock_parameters=aftershock_parameters) for t in t_values]
+    mean_occurance = pd.DataFrame(mean_occurance, index=T_values, columns=t_values)
+
+    if plot_flag:
+        fig = plt.figure(figsize=(10,5))
+        elev = 40
+        azim = 40
+        ax = fig.add_subplot(111, projection='3d', elev=elev, azim=azim)
+
+        t_grid,T_grid = np.meshgrid(t_values, T_values)
+        _ = ax.plot_surface(np.log(t_grid), np.log(T_grid), np.log(mean_occurance.values), alpha=0.5)
+
+        zticks = np.array([0.0001, 0.001, 0.01, 0.1, 1, 10])
+        _ = ax.set_zticks(np.log(zticks))
+        _ = ax.set_zticklabels(zticks)
+        _ = ax.set_zlabel('Mean Number of Aftershocks\n')
+
+        _ = ax.set_xticks(np.log(t_values))
+        _ = ax.set_xticklabels(t_values)
+        _ = ax.set_xlim([min(np.log(t_values)), max(np.log(t_values))])
+        _ = ax.set_xlabel('\nElapsed Time in Days, t')
+
+        _ = ax.set_yticks(np.log(T_values))
+        _ = ax.set_yticklabels(T_values)
+        _ = ax.set_ylim([min(np.log(T_values)), max(np.log(T_values))])
+        _ = ax.set_ylabel('\nTime Frame Considered, T')
+
+        _ = ax.set_title('Mainshock Magnitude: ' + str(m_max) + 'Mw')
+        _ = plt.tight_layout()
+        _ = plt.show()
+
+    return mean_occurance
+
+
+def aftershock_r_and_m_distribution(site_fault_geometry, m_min, m_max, b, dm, dr, plot_flag):
+    fault_type = 'strike-slip'
+
+    [m_list, p_mag] = prob_magnitude(m_max, m_min, b, dm, plot_flag=False)
+
+    for m, i_m in zip(m_list, range(len(m_list))):
+
+        [r_list, p_dist] = prob_distance(m, site_fault_geometry, fault_type, dr, plot_flag=False)
+
+        if i_m == 0:
+            prob_r_given_m = np.zeros([len(m_list), len(r_list)])
+            prob_r_given_m[i_m, :] = p_dist
+            prob_r_m = np.zeros([len(m_list), len(r_list)])
+            prob_r_m[i_m, :] = p_dist * p_mag[i_m]
+            r_labels = r_list
+        else:
+            n_r = len(r_list)
+            prob_r_given_m[i_m, :n_r] = p_dist
+            prob_r_m[i_m, :n_r] = p_dist * p_mag[i_m]
+        r_list = r_labels
+
+    if plot_flag:
+        fig, ax = plt.subplots(1, 1, figsize=(12, 5))
+        _ = sns.heatmap(prob_r_given_m, linewidth=0.5)
+        _ = ax.set_xlabel('Site to Source Distance, R')
+        _ = ax.set_xticks(np.arange(len(r_labels)))
+        _ = ax.set_xticklabels(r_labels, rotation=90)
+        _ = ax.set_ylabel('Magnitude, M')
+        _ = ax.set_yticklabels(m_list, rotation=0)
+        _ = ax.set_title('PMF Distance | Magnitude')
+        _ = plt.show()
+
+        fig, ax = plt.subplots(1, 1, figsize=(12, 5))
+        _ = sns.heatmap(prob_r_m, linewidth=0.5)
+        _ = ax.set_xlabel('Site to Source Distance, R')
+        _ = ax.set_xticks(np.arange(len(r_labels)))
+        _ = ax.set_xticklabels(r_labels, rotation=90)
+        _ = ax.set_ylabel('Magnitude, M')
+        _ = ax.set_yticklabels(m_list, rotation=0)
+        _ = ax.set_title('PMF Magnitude and Distance')
+        _ = plt.show()
+
+    return pd.DataFrame(prob_r_m, index=m_list, columns=r_list)
