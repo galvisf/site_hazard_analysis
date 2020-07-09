@@ -434,8 +434,11 @@ def sa_avg_gmpe(t, sa_avg_parameters, m, r_rup, r_jb, r_x, delta, rake_angle, z_
     rho = sa_avg_parameters['rho']
 
     # retrieve median and standard deviations for each period
-    y, sigma, t = cy_2008_nga(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10)
-
+    if f_as == 0:
+        y, sigma, t = cy_2008_nga(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10)
+    elif f_as == 1:
+        #median, sigma, period1 = BSSA_2014_nga (M, T, Rjb, Fault_Type, region, z1, Vs30) #ARGUMENTS TO BE ADDED
+            
     # calculate the median for sa_avg
     n_t = len(t)
     y_sa_avg = np.exp((1 / n_t) * np.sum(np.log(y)))
@@ -469,7 +472,10 @@ def prob_exceeding_im(t, m, r, f_as, vs30, f_vs30, z_10, im_type, sa_avg_paramet
 
     # call the gmpe based on the intensity measure
     if im_type == 'sa_t':
-        y, sigma, t = cy_2008_nga(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10)
+        if f_as == 0:
+            y, sigma, t = cy_2008_nga(t, m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f_vs30, z_10)
+        elif f_as ==1:
+            #median, sigma, period1 = BSSA_2014_nga (M, T, Rjb, Fault_Type, region, z1, Vs30) #ARGUMENTS TO BE ADDED
         y = y[0]
         sigma = sigma[0]
     elif im_type == 'sa_avg':
