@@ -301,7 +301,7 @@ def cy_2008_nga_sub(m, r_rup, r_jb, r_x, delta, rake_angle, z_tor, f_as, vs30, f
     term1 = phi1 * min(np.log(vs30 / 1130), 0)
     term2 = phi2 * (np.exp(phi3 * (min(vs30, 1130) - 360)) - np.exp(phi3 * (1130 - 360))) * np.log(
         (y_ref + phi4) / phi4)
-    term3 = phi5 * (1 - (1 / np.cos(phi6 * max(0, z_10 - phi7))))
+    term3 = phi5 * (1 - (1 / np.cosh(phi6 * max(0, z_10 - phi7))))
     term4 = phi8 / (np.cosh(0.15 * max(0, z_10 - 15)))
 
     y = np.exp(np.log(y_ref) + term1 + term2 + term3 + term4)
