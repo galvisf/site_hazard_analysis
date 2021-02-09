@@ -10,6 +10,10 @@ def risk_convolution(im_exceedance_frequency, im_list, fragilities):
     dfreq_im = [np.abs((freq[i + 1] - freq[i]) / dim) for i in range(len(im_list) - 1)]
     dfreq_im = np.append(dfreq_im, dfreq_im[-1])
 
+    if type(medians) is not list:
+        medians = [medians]
+        betas = [betas]
+
     freq_collapse = np.zeros(len(medians))
     for median, beta, i in zip(medians, betas, range(len(medians))):
         p_collapse_im = stats.lognorm(beta, scale=median).cdf(im_list)

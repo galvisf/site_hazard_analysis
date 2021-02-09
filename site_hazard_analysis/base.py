@@ -1,4 +1,5 @@
 import numpy as np
+import scipy as sp
 import pandas as pd
 import geopandas as gpd
 import utm
@@ -9,6 +10,7 @@ import matplotlib as mpl
 import os
 import subprocess
 import h5py
+import requests
 
 from scipy import stats
 from scipy.optimize import minimize
